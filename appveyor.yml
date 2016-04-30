@@ -1,13 +1,17 @@
 os: Visual Studio 2015
+version: "{build}"
 
 install:
-  - cinst mozillabuild
+  #- cinst mozillabuild
+  - ps: Start-FileDownload 'https://ftp.mozilla.org/pub/mozilla.org/mozilla/libraries/win32/MozillaBuildSetup-Latest.exe'
+  - MozillaBuildSetup-Latest.exe
 
 before_build:
-  # - choco install mozillabuild
   - hg clone https://hg.mozilla.org/projects/nspr C:\projects\nspr
   - xcopy C:\projects\nss\automation\start-shell-msvc2015-x64.bat C:\mozilla-build\ /Y
   - xcopy C:\projects\nss\automation\start-shell.bat C:\mozilla-build\ /Y
+
+build_script:
   - C:\mozilla-build\start-shell-msvc2015-x64.bat /c/projects/nss/automation/appveyor-build.sh
 
 test: off
