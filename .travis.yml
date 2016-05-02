@@ -57,7 +57,7 @@ env:
 
 install:
   - hg clone https://hg.mozilla.org/projects/nspr ../nspr
-  - if [ "$TRAVIS_OS_NAME" == "osx" ]; then brew update; brew install llvm38; fi
+  - [ "$TRAVIS_OS_NAME" == "osx" ] && brew update && brew install llvm38
 
 script:
   - if [ -n "$CLANG_FORMAT" ]; then automation/travis/validate-formatting.sh lib/ssl; exit $?; fi
