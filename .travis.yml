@@ -50,16 +50,11 @@ matrix:
   allow_failures:
     - env: CLANG_FORMAT=1
 
-env:
-  global:
-    - USE_64=1
-    - NSS_ENABLE_TLS_1_3=1
-
 install:
   - hg clone https://hg.mozilla.org/projects/nspr ../nspr
   - [ "$TRAVIS_OS_NAME" == "osx" ] && brew update && brew install llvm38
 
 script:
-  - [ -n "$CLANG_FORMAT" ] && automation/travis/subdir-clang-format.sh lib/ssl
+  - [ -n "$CLANG_FORMAT" ] && automation/travis/validate-formatting.sh lib/ssl
   - make nss_build_all
   - cd tests; NSS_TESTS="ssl_gtests pk11_gtests der_gtests util_gtests" NSS_CYCLES=standard ./all.sh
