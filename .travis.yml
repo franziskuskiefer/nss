@@ -51,8 +51,9 @@ matrix:
     - env: CLANG_FORMAT=1
 
 env:
-  - USE_64=1
-  - NSS_ENABLE_TLS_1_3=1
+  global:
+    - USE_64=1
+    - NSS_ENABLE_TLS_1_3=1
 
 install:
   - hg clone https://hg.mozilla.org/projects/nspr ../nspr
