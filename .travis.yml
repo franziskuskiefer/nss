@@ -66,8 +66,7 @@ script:
 
 notifications:
   irc:
-    channels:
-      - ircs://irc.mozilla.org:6697/#nssbot
-      nick: travisci-franziskus
-      on_success: change
-      on_failure: always
+    - ircs://irc.mozilla.org:6697/#nssbot
+    nick: travisci-franziskus
+    on_success: change
+    on_failure: always
