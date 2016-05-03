@@ -1,5 +1,6 @@
 sudo: required
 dist: trusty
+language: C
 
 addons:
   apt:
@@ -19,32 +20,17 @@ matrix:
   include:
     - os: osx
       compiler: clang-3.8
-      env:
-        - CC=clang-3.8
-        - CCC=clang++-3.8
     - os: osx
       compiler: clang-3.8
-      env:
-        - CC=clang-3.8
-        - CCC=clang++-3.8
-        - BUILD_OPT=1
+      env: BUILD_OPT=1
     - os: linux
       compiler: gcc
-      env:
-        - CC=gcc-5
-        - CCC=g++-5
     - os: linux
       compiler: gcc
-      env:
-        - CC=gcc-5
-        - CCC=g++-5
-        - BUILD_OPT=1
+      env: BUILD_OPT=1
     - os: linux
       compiler: gcc
-      env:
-        - CC=gcc-5
-        - CCC=g++-5
-        - USE_ASAN=1
+      env: USE_ASAN=1
     - os: linux
       env: CLANG_FORMAT=1
   allow_failures:
@@ -54,6 +40,8 @@ env:
   global:
     - USE_64=1
     - NSS_ENABLE_TLS_1_3=1
+    - if [ "$TRAVIS_OS_NAME" == "osx" ]; CC=gcc-5 CCC=g++-5; fi
+    - if [ "$TRAVIS_OS_NAME" == "linux" ]; CC=clang-3.8 CCC=clang++-3.8; fi
 
 install:
   - hg clone https://hg.mozilla.org/projects/nspr ../nspr
