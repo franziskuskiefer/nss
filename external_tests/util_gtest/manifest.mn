@@ -7,7 +7,6 @@ DEPTH      = ../..
 MODULE = nss
 
 CPPSRCS = \
-	../common/gtests.cc \
 	util_utf8_unittest.cc \
 	$(NULL)
 
@@ -23,3 +22,5 @@ EXTRA_LIBS = \
 	$(DIST)/lib/$(LIB_PREFIX)gtest.$(LIB_SUFFIX) \
 	$(DIST)/lib/$(LIB_PREFIX)nssutil.$(LIB_SUFFIX) \
 	$(NULL)
+
+EXTRA_OBJS = ../common/$(OBJDIR)/gtests.o

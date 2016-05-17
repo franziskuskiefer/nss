@@ -249,7 +249,7 @@ ifdef MT
 	fi
 endif	# MSVC with manifest tool
 else
-	$(MKPROG) -o $@ $(CFLAGS) $(OBJS) $(LDFLAGS) $(EXTRA_LIBS) $(EXTRA_SHARED_LIBS) $(OS_LIBS)
+	$(MKPROG) -o $@ $(CFLAGS) $(OBJS) $(EXTRA_OBJS) $(LDFLAGS) $(EXTRA_LIBS) $(EXTRA_SHARED_LIBS) $(OS_LIBS)
 endif
 
 get_objs:
