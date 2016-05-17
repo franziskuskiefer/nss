@@ -23,4 +23,4 @@ EXTRA_LIBS = \
 	$(DIST)/lib/$(LIB_PREFIX)nssutil.$(LIB_SUFFIX) \
 	$(NULL)
 
-EXTRA_OBJS = ../common/$(OBJDIR)/gtests.o
+EXTRA_OBJS = ../common/$(OBJDIR)/gtests$(OBJ_SUFFIX)
