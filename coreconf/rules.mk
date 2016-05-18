@@ -241,7 +241,7 @@ alltags:
 $(PROGRAM): $(OBJS) $(EXTRA_LIBS)
 	@$(MAKE_OBJDIR)
 ifeq (,$(filter-out _WIN%,$(NS_USE_GCC)_$(OS_TARGET)))
-	$(MKPROG) $(subst /,\\,$(OBJS)) $(subst /,\\,$(EXTRA_OBJS)) -Fe$@ -link $(LDFLAGS) $(XLDFLAGS) $(subst /,\\,$(EXTRA_LIBS) $(EXTRA_SHARED_LIBS) $(OS_LIBS))
+	$(MKPROG) $(subst /,\\,$(OBJS)) -Fe$@ -link $(LDFLAGS) $(XLDFLAGS) $(subst /,\\,$(EXTRA_LIBS) $(EXTRA_SHARED_LIBS) $(OS_LIBS))
 ifdef MT
 	if test -f $@.manifest; then \
 		$(MT) -NOLOGO -MANIFEST $@.manifest -OUTPUTRESOURCE:$@\;1; \
@@ -249,7 +249,7 @@ ifdef MT
 	fi
 endif	# MSVC with manifest tool
 else
-	$(MKPROG) -o $@ $(CFLAGS) $(OBJS) $(EXTRA_OBJS) $(LDFLAGS) $(EXTRA_LIBS) $(EXTRA_SHARED_LIBS) $(OS_LIBS)
+	$(MKPROG) -o $@ $(CFLAGS) $(OBJS) $(LDFLAGS) $(EXTRA_LIBS) $(EXTRA_SHARED_LIBS) $(OS_LIBS)
 endif
 
 get_objs:
