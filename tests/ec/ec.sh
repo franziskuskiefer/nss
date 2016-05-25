@@ -33,5 +33,5 @@ run_ec_tests()
     done
 }
 
-ECTESTS="ecperf"
+ECTESTS="ecperf ec-tests"
 run_ec_tests

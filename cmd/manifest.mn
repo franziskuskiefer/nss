@@ -79,6 +79,11 @@ NSS_SRCDIRS = \
 endif
 endif
 
+
+ifeq ($(FREEBL_TEST),1)
+ NSS_SRCDIRS += ec-tests
+endif
+
 DIRS = \
  $(LIB_SRCDIRS) \
  $(SOFTOKEN_SRCDIRS) \

@@ -67,7 +67,9 @@ ifneq (,$(findstring _,$(LIBRARY_NAME)))
   LIBRARY_VERSION := _$(LIBRARY_VERSION)
 endif
 
-MAPFILE = $(OBJDIR)/$(LIBRARY_NAME).def
+ifneq ($(FREEBL_TEST),1)
+  MAPFILE = $(OBJDIR)/$(LIBRARY_NAME).def
+endif
 
 SOFTOKEN_LIBRARY_VERSION = 3
 
