@@ -71,6 +71,7 @@ NSS_SRCDIRS = \
  symkeyutil \
  tests \
  tstclnt  \
+ tlsclient \
  vfychain \
  vfyserv \
  modutil \
