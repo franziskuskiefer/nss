@@ -6,6 +6,7 @@
 #define _SHA_FAST_H_
 
 #include "prlong.h"
+#include "blapii.h"
 
 #define SHA1_INPUT_LEN 64
 
@@ -98,6 +99,7 @@ swap4b(PRUint32 value)
       defined(__ARM_ARCH_7__) ||   \
       defined(__ARM_ARCH_7A__) ||  \
       defined(__ARM_ARCH_7R__)))
+#if defined(IS_LITTLE_ENDIAN)
 static __inline__ PRUint32
 swap4b(PRUint32 value)
 {
@@ -108,6 +110,7 @@ swap4b(PRUint32 value)
     return ret;
 }
 #define SHA_HTONL(x) swap4b(x)
+#endif
 
 #endif /* x86 family */
 
@@ -116,10 +119,6 @@ swap4b(PRUint32 value)
 #if !defined(SHA_ROTL_IS_DEFINED)
 #define SHA_NEED_TMP_VARIABLE 1
 #define SHA_ROTL(X, n) (tmp = (X), ((tmp) << (n)) | ((tmp) >> (32 - (n))))
-#endif
-
-#if defined(NSS_X86_OR_X64)
-#define SHA_ALLOW_UNALIGNED_ACCESS 1
 #endif
 
 #if !defined(SHA_HTONL)
@@ -137,7 +136,7 @@ swap4b(PRUint32 value)
 #define SHA_BYTESWAP(x) x = SHA_HTONL(x)
 
 #define SHA_STORE(n) ((PRUint32*)hashout)[n] = SHA_HTONL(ctx->H[n])
-#if defined(SHA_ALLOW_UNALIGNED_ACCESS)
+#if defined(HAVE_UNALIGNED_ACCESS)
 #define SHA_STORE_RESULT \
     SHA_STORE(0);        \
     SHA_STORE(1);        \

@@ -12,7 +12,7 @@
 #include "prprf.h"
 #include "prmem.h"
 #include "cert.h"
-#include "key.h"
+#include "keyhi.h"
 #include "secmod.h"
 #include "secoid.h"
 #include "nss.h"
@@ -54,7 +54,7 @@ nss_mktemp(char *path)
 
 #define NSS_MAX_FLAG_SIZE sizeof("readOnly") + sizeof("noCertDB") +                                  \
                               sizeof("noModDB") + sizeof("forceOpen") + sizeof("passwordRequired") + \
-                              sizeof("optimizeSpace")
+                              sizeof("optimizeSpace") + sizeof("printPolicyFeedback")
 #define NSS_DEFAULT_MOD_NAME "NSS Internal Module"
 
 static char *
@@ -98,7 +98,6 @@ nss_makeFlags(PRBool readOnly, PRBool noCertDB,
         if (!first)
             PORT_Strcat(flags, ",");
         PORT_Strcat(flags, "optimizeSpace");
-        first = PR_FALSE;
     }
     return flags;
 }
@@ -663,6 +662,21 @@ nss_Init(const char *configdir, const char *certPrefix, const char *keyPrefix,
             configName = initParams->libraryDescription;
             passwordRequired = initParams->passwordRequired;
         }
+
+        /* If we're NSS_ContextInit, we're probably a library. It could be
+         * possible that the application initialized NSS then forked(). The
+         * library would have no knowledge of that. If we call 
+         * SECMOD_RestartModules() here, we will be able to continue on with
+         * NSS as normal. SECMOD_RestartModules() does have the side affect
+         * of losing all our PKCS #11 objects in the new process, but only if
+         * the module needs to be reinited. If it needs to be reinit those
+         * objects are inaccessible anyway, it's always save to call
+         * SECMOD_RestartModules(PR_FALSE).
+         */
+        /* NOTE: We could call SECMOD_Init() here, but if we aren't already
+         * inited, then there's no modules to restart, so SECMOD_RestartModules
+         * will return immediately */
+        SECMOD_RestartModules(PR_FALSE);
     } else {
         configStrings = pk11_config_strings;
         configName = pk11_config_name;
@@ -688,6 +702,30 @@ nss_Init(const char *configdir, const char *certPrefix, const char *keyPrefix,
         if (SECOID_Init() != SECSuccess) {
             goto loser;
         }
+#ifdef POLICY_FILE
+        /* Load the system crypto policy file if it exists,
+         * unless the NSS_IGNORE_SYSTEM_POLICY environment
+         * variable has been set to 1. */
+        ignoreVar = PR_GetEnvSecure("NSS_IGNORE_SYSTEM_POLICY");
+        if (ignoreVar == NULL || strncmp(ignoreVar, "1", sizeof("1")) != 0) {
+            if (PR_Access(POLICY_PATH "/" POLICY_FILE, PR_ACCESS_READ_OK) == PR_SUCCESS) {
+                SECMODModule *module = SECMOD_LoadModule(
+                    "name=\"Policy File\" "
+                    "parameters=\"configdir='sql:" POLICY_PATH "' "
+                    "secmod='" POLICY_FILE "' "
+                    "flags=readOnly,noCertDB,forceSecmodChoice,forceOpen\" "
+                    "NSS=\"flags=internal,moduleDB,skipFirst,moduleDBOnly,critical\"",
+                    parent, PR_TRUE);
+                if (module) {
+                    PRBool isLoaded = module->loaded;
+                    SECMOD_DestroyModule(module);
+                    if (!isLoaded) {
+                        goto loser;
+                    }
+                }
+            }
+        }
+#endif
         if (STAN_LoadDefaultNSS3TrustDomain() != PR_SUCCESS) {
             goto loser;
         }
@@ -716,30 +754,6 @@ nss_Init(const char *configdir, const char *certPrefix, const char *keyPrefix,
                 }
             }
         }
-#ifdef POLICY_FILE
-        /* Load the system crypto policy file if it exists,
-         * unless the NSS_IGNORE_SYSTEM_POLICY environment
-         * variable has been set to 1. */
-        ignoreVar = PR_GetEnvSecure("NSS_IGNORE_SYSTEM_POLICY");
-        if (ignoreVar == NULL || strncmp(ignoreVar, "1", sizeof("1")) != 0) {
-            if (PR_Access(POLICY_PATH "/" POLICY_FILE, PR_ACCESS_READ_OK) == PR_SUCCESS) {
-                SECMODModule *module = SECMOD_LoadModule(
-                    "name=\"Policy File\" "
-                    "parameters=\"configdir='sql:" POLICY_PATH "' "
-                    "secmod='" POLICY_FILE "' "
-                    "flags=readOnly,noCertDB,forceSecmodChoice,forceOpen\" "
-                    "NSS=\"flags=internal,moduleDB,skipFirst,moduleDBOnly,critical\"",
-                    parent, PR_TRUE);
-                if (module) {
-                    PRBool isLoaded = module->loaded;
-                    SECMOD_DestroyModule(module);
-                    if (!isLoaded) {
-                        goto loser;
-                    }
-                }
-            }
-        }
-#endif
         pk11sdr_Init();
         cert_CreateSubjectKeyIDHashTable();
 

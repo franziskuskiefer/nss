@@ -9,7 +9,7 @@
 #include "secport.h"
 #include "prerror.h"
 #include "base64.h"
-#include "key.h"
+#include "keyhi.h"
 #include "secpkcs7.h"
 #include "secasn1.h"
 #include "secder.h"
@@ -18,6 +18,7 @@
 #include "basicutil.h"
 #include "sslerr.h"
 #include "sslt.h"
+#include "blapi.h"
 
 #define SEC_CT_PRIVATE_KEY "private-key"
 #define SEC_CT_PUBLIC_KEY "public-key"
@@ -322,12 +323,12 @@ extern SECStatus SECU_StoreCRL(PK11SlotInfo *slot, SECItem *derCrl,
 ** MD5 hashing algorithm. This routine first computes a digital signature
 ** using SEC_SignData, then wraps it with an CERTSignedData and then der
 ** encodes the result.
-**	"arena" is the memory arena to use to allocate data from
-**      "sd" returned CERTSignedData
-** 	"result" the final der encoded data (memory is allocated)
-** 	"buf" the input data to sign
-** 	"len" the amount of data to sign
-** 	"pk" the private key to encrypt with
+**     "arena" is the memory arena to use to allocate data from
+**     "sd" returned CERTSignedData
+**     "result" the final der encoded data (memory is allocated)
+**     "buf" the input data to sign
+**     "len" the amount of data to sign
+**     "pk" the private key to encrypt with
 */
 extern SECStatus SECU_DerSignDataCRL(PLArenaPool *arena, CERTSignedData *sd,
                                      unsigned char *buf, int len,
@@ -402,6 +403,12 @@ SECStatus
 SECU_ParseSSLVersionRangeString(const char *input,
                                 const SSLVersionRange defaultVersionRange,
                                 SSLVersionRange *vrange);
+
+SECStatus parseGroupList(const char *arg, SSLNamedGroup **enabledGroups,
+                         unsigned int *enabledGroupsCount);
+SECStatus parseSigSchemeList(const char *arg,
+                             const SSLSignatureScheme **enabledSigSchemes,
+                             unsigned int *enabledSigSchemeCount);
 
 /*
  *

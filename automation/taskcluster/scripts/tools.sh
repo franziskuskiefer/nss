@@ -2,24 +2,25 @@
 
 set -v -e -x
 
-switch_compilers() {
-    GCC=`which ${GCC_VERSION:-gcc-5}`
-    GXX=`which ${GXX_VERSION:-g++-5}`
+# Assert that we're not running as root.
+if [[ $(id -u) -eq 0 ]]; then
+    # This exec is still needed until aarch64 images are updated (Bug 1488325).
+    # Remove when images are updated.  Until then, assert that things are good.
+    [[ $(uname -m) == aarch64 ]]
+    exec su worker -c "$0 $*"
+fi
 
-    if [ -e "$GCC" ] && [ -e "$GXX" ]; then
-        update-alternatives --set gcc $GCC
-        update-alternatives --set g++ $GXX
-    else
-        echo "Unknown compiler $GCC_VERSION/$GXX_VERSION."
-        exit 1
-    fi
-}
+export PATH="${PATH}:/home/worker/.cargo/bin/:/usr/lib/go-1.6/bin"
 
 # Usage: hg_clone repo dir [revision=@]
 hg_clone() {
     repo=$1
     dir=$2
     rev=${3:-@}
+    if [ -d "$dir" ]; then
+        hg pull -R "$dir" -ur "$rev" "$repo" && return
+        rm -rf "$dir"
+    fi
     for i in 0 2 5; do
         sleep $i
         hg clone -r "$rev" "$repo" "$dir" && return

@@ -112,7 +112,6 @@ static SSL3Statistics *ssl3stats;
 
 static int failed_already = 0;
 static SSLVersionRange enabledVersions;
-static PRBool bypassPKCS11 = PR_FALSE;
 static PRBool disableLocking = PR_FALSE;
 static PRBool ignoreErrors = PR_FALSE;
 static PRBool enableSessionTickets = PR_FALSE;
@@ -138,7 +137,7 @@ SECItem bigBuf;
     fprintf
 
 static void
-Usage(const char *progName)
+Usage(void)
 {
     fprintf(stderr,
             "Usage: %s [-n nickname] [-p port] [-d dbdir] [-c connections]\n"
@@ -159,7 +158,6 @@ Usage(const char *progName)
             "          Possible values for min/max: ssl3 tls1.0 tls1.1 tls1.2\n"
             "          Example: \"-V ssl3:\" enables SSL 3 and newer.\n"
             "       -U means enable throttling up threads\n"
-            "       -B bypasses the PKCS11 layer for SSL encryption and MACing\n"
             "       -T enable the cert_status extension (OCSP stapling)\n"
             "       -u enable TLS Session Ticket extension\n"
             "       -z enable compression\n"
@@ -262,7 +260,6 @@ void
 printSecurityInfo(PRFileDesc *fd)
 {
     CERTCertificate *cert = NULL;
-    SSL3Statistics *ssl3stats = SSL_GetStatistics();
     SECStatus result;
     SSLChannelInfo channel;
     SSLCipherSuiteInfo suite;
@@ -888,8 +885,10 @@ PRBool
 LoggedIn(CERTCertificate *cert, SECKEYPrivateKey *key)
 {
     if ((cert->slot) && (key->pkcs11Slot) &&
-        (PR_TRUE == PK11_IsLoggedIn(cert->slot, NULL)) &&
-        (PR_TRUE == PK11_IsLoggedIn(key->pkcs11Slot, NULL))) {
+        (!PK11_NeedLogin(cert->slot) ||
+         PR_TRUE == PK11_IsLoggedIn(cert->slot, NULL)) &&
+        (!PK11_NeedLogin(key->pkcs11Slot) ||
+         PR_TRUE == PK11_IsLoggedIn(key->pkcs11Slot, NULL))) {
         return PR_TRUE;
     }
 
@@ -1095,7 +1094,6 @@ client_main(
         while (0 != (ndx = *cipherString)) {
             const char *startCipher = cipherString++;
             int cipher = 0;
-            SECStatus rv;
 
             if (ndx == ':') {
                 cipher = hexchar_to_int(*cipherString++);
@@ -1171,13 +1169,6 @@ client_main(
         rv = SSL_OptionSet(model_sock, SSL_NO_CACHE, 1);
         if (rv < 0) {
             errExit("SSL_OptionSet SSL_NO_CACHE");
-        }
-    }
-
-    if (bypassPKCS11) {
-        rv = SSL_OptionSet(model_sock, SSL_BYPASS_PKCS11, 1);
-        if (rv < 0) {
-            errExit("SSL_OptionSet SSL_BYPASS_PKCS11");
         }
     }
 
@@ -1322,14 +1313,12 @@ main(int argc, char **argv)
     progName = strrchr(tmp, '\\');
     progName = progName ? progName + 1 : tmp;
 
+    /* XXX: 'B' was used in the past but removed in 3.28,
+     *      please leave some time before resuing it. */
     optstate = PL_CreateOptState(argc, argv,
-                                 "BC:DNP:TUV:W:a:c:d:f:gin:op:qst:uvw:z");
+                                 "C:DNP:TUV:W:a:c:d:f:gin:op:qst:uvw:z");
     while ((status = PL_GetNextOpt(optstate)) == PL_OPT_OK) {
         switch (optstate->option) {
-            case 'B':
-                bypassPKCS11 = PR_TRUE;
-                break;
-
             case 'C':
                 cipherString = optstate->value;
                 break;
@@ -1361,7 +1350,8 @@ main(int argc, char **argv)
                 if (SECU_ParseSSLVersionRangeString(optstate->value,
                                                     enabledVersions, &enabledVersions) !=
                     SECSuccess) {
-                    Usage(progName);
+                    fprintf(stderr, "Bad version specified.\n");
+                    Usage();
                 }
                 break;
 
@@ -1439,27 +1429,27 @@ main(int argc, char **argv)
 
             case 0: /* positional parameter */
                 if (hostName) {
-                    Usage(progName);
+                    Usage();
                 }
                 hostName = PL_strdup(optstate->value);
                 break;
 
             default:
             case '?':
-                Usage(progName);
+                Usage();
                 break;
         }
     }
     PL_DestroyOptState(optstate);
 
     if (!hostName || status == PL_OPT_BAD)
-        Usage(progName);
+        Usage();
 
     if (fullhs != NO_FULLHS_PERCENTAGE && (fullhs < 0 || fullhs > 100 || NoReuse))
-        Usage(progName);
+        Usage();
 
     if (port == 0)
-        Usage(progName);
+        Usage();
 
     if (fileName)
         readBigFile(fileName);

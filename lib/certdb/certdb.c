@@ -446,6 +446,74 @@ cert_GetCertType(CERTCertificate *cert)
     return SECSuccess;
 }
 
+PRBool
+cert_EKUAllowsIPsecIKE(CERTCertificate *cert, PRBool *isCritical)
+{
+    SECStatus rv;
+    SECItem encodedExtKeyUsage;
+    CERTOidSequence *extKeyUsage = NULL;
+    PRBool result = PR_FALSE;
+
+    rv = CERT_GetExtenCriticality(cert->extensions,
+                                  SEC_OID_X509_EXT_KEY_USAGE,
+                                  isCritical);
+    if (rv != SECSuccess) {
+        *isCritical = PR_FALSE;
+    }
+
+    encodedExtKeyUsage.data = NULL;
+    rv = CERT_FindCertExtension(cert, SEC_OID_X509_EXT_KEY_USAGE,
+                                &encodedExtKeyUsage);
+    if (rv != SECSuccess) {
+        /* EKU not present, allowed. */
+        result = PR_TRUE;
+        goto done;
+    }
+
+    extKeyUsage = CERT_DecodeOidSequence(&encodedExtKeyUsage);
+    if (!extKeyUsage) {
+        /* failure */
+        goto done;
+    }
+
+    if (findOIDinOIDSeqByTagNum(extKeyUsage,
+                                SEC_OID_X509_ANY_EXT_KEY_USAGE) ==
+        SECSuccess) {
+        result = PR_TRUE;
+        goto done;
+    }
+
+    if (findOIDinOIDSeqByTagNum(extKeyUsage,
+                                SEC_OID_EXT_KEY_USAGE_IPSEC_IKE) ==
+        SECSuccess) {
+        result = PR_TRUE;
+        goto done;
+    }
+
+    if (findOIDinOIDSeqByTagNum(extKeyUsage,
+                                SEC_OID_IPSEC_IKE_END) ==
+        SECSuccess) {
+        result = PR_TRUE;
+        goto done;
+    }
+
+    if (findOIDinOIDSeqByTagNum(extKeyUsage,
+                                SEC_OID_IPSEC_IKE_INTERMEDIATE) ==
+        SECSuccess) {
+        result = PR_TRUE;
+        goto done;
+    }
+
+done:
+    if (encodedExtKeyUsage.data != NULL) {
+        PORT_Free(encodedExtKeyUsage.data);
+    }
+    if (extKeyUsage != NULL) {
+        CERT_DestroyOidSequence(extKeyUsage);
+    }
+    return result;
+}
+
 PRUint32
 cert_ComputeCertType(CERTCertificate *cert)
 {
@@ -1083,6 +1151,10 @@ CERT_KeyUsageAndTypeForCertUsage(SECCertUsage usage, PRBool ca,
                 requiredKeyUsage = KU_KEY_CERT_SIGN;
                 requiredCertType = NS_CERT_TYPE_SSL_CA;
                 break;
+            case certUsageIPsec:
+                requiredKeyUsage = KU_KEY_CERT_SIGN;
+                requiredCertType = NS_CERT_TYPE_SSL_CA;
+                break;
             case certUsageSSLCA:
                 requiredKeyUsage = KU_KEY_CERT_SIGN;
                 requiredCertType = NS_CERT_TYPE_SSL_CA;
@@ -1124,6 +1196,11 @@ CERT_KeyUsageAndTypeForCertUsage(SECCertUsage usage, PRBool ca,
             case certUsageSSLServer:
                 requiredKeyUsage = KU_KEY_AGREEMENT_OR_ENCIPHERMENT;
                 requiredCertType = NS_CERT_TYPE_SSL_SERVER;
+                break;
+            case certUsageIPsec:
+                /* RFC 4945 Section 5.1.3.2 */
+                requiredKeyUsage = KU_DIGITAL_SIGNATURE_OR_NON_REPUDIATION;
+                requiredCertType = 0;
                 break;
             case certUsageSSLServerWithStepUp:
                 requiredKeyUsage =
@@ -1192,6 +1269,7 @@ CERT_CheckKeyUsage(CERTCertificate *cert, unsigned int requiredUsage)
             case rsaKey:
                 requiredUsage |= KU_KEY_ENCIPHERMENT;
                 break;
+            case rsaPssKey:
             case dsaKey:
                 requiredUsage |= KU_DIGITAL_SIGNATURE;
                 break;
@@ -1295,12 +1373,16 @@ CERT_AddOKDomainName(CERTCertificate *cert, const char *hn)
         PORT_SetError(SEC_ERROR_INVALID_ARGS);
         return SECFailure;
     }
-    domainOK = (CERTOKDomainName *)PORT_ArenaZAlloc(
-        cert->arena, (sizeof *domainOK) + newNameLen);
-    if (!domainOK)
+    domainOK = (CERTOKDomainName *)PORT_ArenaZAlloc(cert->arena, sizeof(*domainOK));
+    if (!domainOK) {
         return SECFailure; /* error code is already set. */
+    }
+    domainOK->name = (char *)PORT_ArenaZAlloc(cert->arena, newNameLen + 1);
+    if (!domainOK->name) {
+        return SECFailure; /* error code is already set. */
+    }
 
-    PORT_Strcpy(domainOK->name, hn);
+    PORT_Strncpy(domainOK->name, hn, newNameLen + 1);
     sec_lower_string(domainOK->name);
 
     /* put at head of list. */
@@ -1402,7 +1484,6 @@ cert_VerifySubjectAltName(const CERTCertificate *cert, const char *hn)
         goto fail;
     }
     isIPaddr = (PR_SUCCESS == PR_StringToNetAddr(hn, &netAddr));
-    rv = SECFailure;
     arena = PORT_NewArena(DER_DEFAULT_CHUNKSIZE);
     if (!arena)
         goto fail;
@@ -2556,9 +2637,9 @@ CERT_AddCertToListHeadWithData(CERTCertList *certs, CERTCertificate *cert,
     CERTCertListNode *head;
 
     head = CERT_LIST_HEAD(certs);
-
-    if (head == NULL)
-        return CERT_AddCertToListTail(certs, cert);
+    if (head == NULL) {
+        goto loser;
+    }
 
     node = (CERTCertListNode *)PORT_ArenaZAlloc(certs->arena,
                                                 sizeof(CERTCertListNode));
@@ -2862,7 +2943,18 @@ CERT_LockCertTrust(const CERTCertificate *cert)
 {
     PORT_Assert(certTrustLock != NULL);
     PZ_Lock(certTrustLock);
-    return;
+}
+
+static PZLock *certTempPermLock = NULL;
+
+/*
+ * Acquire the cert temp/perm lock
+ */
+void
+CERT_LockCertTempPerm(const CERTCertificate *cert)
+{
+    PORT_Assert(certTempPermLock != NULL);
+    PZ_Lock(certTempPermLock);
 }
 
 SECStatus
@@ -2882,6 +2974,18 @@ cert_InitLocks(void)
         if (!certTrustLock) {
             PZ_DestroyLock(certRefCountLock);
             certRefCountLock = NULL;
+            return SECFailure;
+        }
+    }
+
+    if (certTempPermLock == NULL) {
+        certTempPermLock = PZ_NewLock(nssILockCertDB);
+        PORT_Assert(certTempPermLock != NULL);
+        if (!certTempPermLock) {
+            PZ_DestroyLock(certTrustLock);
+            PZ_DestroyLock(certRefCountLock);
+            certRefCountLock = NULL;
+            certTrustLock = NULL;
             return SECFailure;
         }
     }
@@ -2909,6 +3013,14 @@ cert_DestroyLocks(void)
     } else {
         rv = SECFailure;
     }
+
+    PORT_Assert(certTempPermLock != NULL);
+    if (certTempPermLock) {
+        PZ_DestroyLock(certTempPermLock);
+        certTempPermLock = NULL;
+    } else {
+        rv = SECFailure;
+    }
     return rv;
 }
 
@@ -2927,6 +3039,23 @@ CERT_UnlockCertTrust(const CERTCertificate *cert)
     }
 #else
     PZ_Unlock(certTrustLock);
+#endif
+}
+
+/*
+ * Free the temp/perm lock
+ */
+void
+CERT_UnlockCertTempPerm(const CERTCertificate *cert)
+{
+    PORT_Assert(certTempPermLock != NULL);
+#ifdef DEBUG
+    {
+        PRStatus prstat = PZ_Unlock(certTempPermLock);
+        PORT_Assert(prstat == PR_SUCCESS);
+    }
+#else
+    (void)PZ_Unlock(certTempPermLock);
 #endif
 }
 

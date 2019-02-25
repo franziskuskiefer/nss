@@ -38,6 +38,7 @@
 #include "nss.h"
 #include "ssl.h"
 #include "sslproto.h"
+#include "sslexp.h"
 #include "cert.h"
 #include "certt.h"
 #include "ocsp.h"
@@ -56,10 +57,13 @@
 
 int NumSidCacheEntries = 1024;
 
-static int handle_connection(PRFileDesc *, PRFileDesc *, int);
+static int handle_connection(PRFileDesc *, PRFileDesc *);
 
 static const char envVarName[] = { SSL_ENV_VAR_NAME };
 static const char inheritableSockName[] = { "SELFSERV_LISTEN_SOCKET" };
+
+#define MAX_VIRT_SERVER_NAME_ARRAY_INDEX 10
+#define MAX_CERT_NICKNAME_ARRAY_INDEX 10
 
 #define DEFAULT_BULK_TEST 16384
 #define MAX_BULK_TEST 1048576 /* 1 MB */
@@ -92,7 +96,7 @@ static enum ocspStaplingModeEnum {
 } ocspStaplingMode = osm_disabled;
 typedef enum ocspStaplingModeEnum ocspStaplingModeType;
 static char *ocspStaplingCA = NULL;
-static SECItemArray *certStatus[kt_kea_size] = { NULL };
+static SECItemArray *certStatus[MAX_CERT_NICKNAME_ARRAY_INDEX] = { NULL };
 
 const int ssl3CipherSuites[] = {
     -1,                                /* SSL_FORTEZZA_DMS_WITH_FORTEZZA_CBC_SHA* a */
@@ -156,17 +160,15 @@ static void
 PrintUsageHeader(const char *progName)
 {
     fprintf(stderr,
-            "Usage: %s -n rsa_nickname -p port [-BDENRbjlmrsuvx] [-w password]\n"
+            "Usage: %s -n rsa_nickname -p port [-BDENRZbjlmrsuvx] [-w password]\n"
             "         [-t threads] [-i pid_file] [-c ciphers] [-Y] [-d dbdir] [-g numblocks]\n"
             "         [-f password_file] [-L [seconds]] [-M maxProcs] [-P dbprefix]\n"
             "         [-V [min-version]:[max-version]] [-a sni_name]\n"
             "         [ T <good|revoked|unknown|badsig|corrupted|none|ocsp>] [-A ca]\n"
-            "         [-C SSLCacheEntries] [-S dsa_nickname] -Q"
-#ifndef NSS_DISABLE_ECC
-            " [-e ec_nickname]"
-#endif /* NSS_DISABLE_ECC */
-            "\n"
-            "         -U [0|1] -H [0|1|2] -W [0|1]\n",
+            "         [-C SSLCacheEntries] [-S dsa_nickname] [-Q]\n"
+            "         [-I groups] [-J signatureschemes] [-e ec_nickname]\n"
+            "         -U [0|1] -H [0|1|2] -W [0|1]\n"
+            "\n",
             progName);
 }
 
@@ -176,10 +178,8 @@ PrintParameterUsage()
     fputs(
         "-V [min]:[max] restricts the set of enabled SSL/TLS protocol versions.\n"
         "   All versions are enabled by default.\n"
-        "   Possible values for min/max: ssl3 tls1.0 tls1.1 tls1.2\n"
+        "   Possible values for min/max: ssl3 tls1.0 tls1.1 tls1.2 tls1.3\n"
         "   Example: \"-V ssl3:\" enables SSL 3 and newer.\n"
-        "-B bypasses the PKCS11 layer for SSL encryption and MACing\n"
-        "-q checks for bypassability\n"
         "-D means disable Nagle delays in TCP\n"
         "-R means disable detection of rollback from TLS to SSL3\n"
         "-a configure server for SNI.\n"
@@ -194,7 +194,6 @@ PrintParameterUsage()
         "-s means disable SSL socket locking for performance\n"
         "-u means enable Session Ticket extension for TLS.\n"
         "-v means verbose output\n"
-        "-z means enable compression.\n"
         "-L seconds means log statistics every 'seconds' seconds (default=30).\n"
         "-M maxProcs tells how many processes to run in a multi-process server\n"
         "-N means do NOT use the server session cache.  Incompatible with -M.\n"
@@ -218,12 +217,23 @@ PrintParameterUsage()
         "-A <ca> Nickname of a CA used to sign a stapled cert status\n"
         "-U override default ECDHE ephemeral key reuse, 0: refresh, 1: reuse\n"
         "-H override default DHE server support, 0: disable, 1: enable, "
-        " 2: require DH named groups\n"
+        "   2: require DH named groups [RFC7919]\n"
         "-W override default DHE server weak parameters support, 0: disable, 1: enable\n"
         "-c Restrict ciphers\n"
         "-Y prints cipher values allowed for parameter -c and exits\n"
         "-G enables the extended master secret extension [RFC7627]\n"
-        "-Q enables ALPN for HTTP/1.1 [RFC7301]\n",
+        "-Q enables ALPN for HTTP/1.1 [RFC7301]\n"
+        "-I comma separated list of enabled groups for TLS key exchange.\n"
+        "   The following values are valid:\n"
+        "   P256, P384, P521, x25519, FF2048, FF3072, FF4096, FF6144, FF8192\n"
+        "-J comma separated list of enabled signature schemes in preference order.\n"
+        "   The following values are valid:\n"
+        "     rsa_pkcs1_sha1, rsa_pkcs1_sha256, rsa_pkcs1_sha384, rsa_pkcs1_sha512,\n"
+        "     ecdsa_sha1, ecdsa_secp256r1_sha256, ecdsa_secp384r1_sha384,\n"
+        "     ecdsa_secp521r1_sha512,\n"
+        "     rsa_pss_rsae_sha256, rsa_pss_rsae_sha384, rsa_pss_rsae_sha512,\n"
+        "     rsa_pss_pss_sha256, rsa_pss_pss_sha384, rsa_pss_pss_sha512,\n"
+        "-Z enable 0-RTT (for TLS 1.3; also use -u)\n",
         stderr);
 }
 
@@ -430,8 +440,6 @@ myBadCertHandler(void *arg, PRFileDesc *fd)
     return (MakeCertOK ? SECSuccess : SECFailure);
 }
 
-#define MAX_VIRT_SERVER_NAME_ARRAY_INDEX 10
-
 /* Simple SNI socket config function that does not use SSL_ReconfigFD.
  * Only uses one server name but verifies that the names match. */
 PRInt32
@@ -506,7 +514,6 @@ typedef struct jobStr {
     PRCList link;
     PRFileDesc *tcp_sock;
     PRFileDesc *model_sock;
-    int requestCert;
 } JOB;
 
 static PZLock *qLock;             /* this lock protects all data immediately below */
@@ -538,7 +545,7 @@ setupJobs(int maxJobs)
     return SECSuccess;
 }
 
-typedef int startFn(PRFileDesc *a, PRFileDesc *b, int c);
+typedef int startFn(PRFileDesc *a, PRFileDesc *b);
 
 typedef enum { rs_idle = 0,
                rs_running = 1,
@@ -547,7 +554,6 @@ typedef enum { rs_idle = 0,
 typedef struct perThreadStr {
     PRFileDesc *a;
     PRFileDesc *b;
-    int c;
     int rv;
     startFn *startFunc;
     PRThread *prThread;
@@ -561,7 +567,7 @@ thread_wrapper(void *arg)
 {
     perThread *slot = (perThread *)arg;
 
-    slot->rv = (*slot->startFunc)(slot->a, slot->b, slot->c);
+    slot->rv = (*slot->startFunc)(slot->a, slot->b);
 
     /* notify the thread exit handler. */
     PZ_Lock(qLock);
@@ -572,7 +578,7 @@ thread_wrapper(void *arg)
 }
 
 int
-jobLoop(PRFileDesc *a, PRFileDesc *b, int c)
+jobLoop(PRFileDesc *a, PRFileDesc *b)
 {
     PRCList *myLink = 0;
     JOB *myJob;
@@ -592,8 +598,7 @@ jobLoop(PRFileDesc *a, PRFileDesc *b, int c)
         /* myJob will be null when stopping is true and jobQ is empty */
         if (!myJob)
             break;
-        handle_connection(myJob->tcp_sock, myJob->model_sock,
-                          myJob->requestCert);
+        handle_connection(myJob->tcp_sock, myJob->model_sock);
         PZ_Lock(qLock);
         PR_APPEND_LINK(myLink, &freeJobs);
         PZ_NotifyCondVar(freeListNotEmptyCv);
@@ -606,7 +611,6 @@ launch_threads(
     startFn *startFunc,
     PRFileDesc *a,
     PRFileDesc *b,
-    int c,
     PRBool local)
 {
     int i;
@@ -642,7 +646,6 @@ launch_threads(
         slot->state = rs_running;
         slot->a = a;
         slot->b = b;
-        slot->c = c;
         slot->startFunc = startFunc;
         slot->prThread = PR_CreateThread(PR_USER_THREAD,
                                          thread_wrapper, slot, PR_PRIORITY_NORMAL,
@@ -795,18 +798,22 @@ static SSLVersionRange enabledVersions;
 PRBool disableRollBack = PR_FALSE;
 PRBool NoReuse = PR_FALSE;
 PRBool hasSidCache = PR_FALSE;
-PRBool bypassPKCS11 = PR_FALSE;
 PRBool disableLocking = PR_FALSE;
-PRBool testbypass = PR_FALSE;
 PRBool enableSessionTickets = PR_FALSE;
-PRBool enableCompression = PR_FALSE;
 PRBool failedToNegotiateName = PR_FALSE;
 PRBool enableExtendedMasterSecret = PR_FALSE;
 PRBool zeroRTT = PR_FALSE;
 PRBool enableALPN = PR_FALSE;
+SSLNamedGroup *enabledGroups = NULL;
+unsigned int enabledGroupsCount = 0;
+const SSLSignatureScheme *enabledSigSchemes = NULL;
+unsigned int enabledSigSchemeCount = 0;
 
 static char *virtServerNameArray[MAX_VIRT_SERVER_NAME_ARRAY_INDEX];
 static int virtServerNameIndex = 1;
+
+static char *certNicknameArray[MAX_CERT_NICKNAME_ARRAY_INDEX];
+static int certNicknameIndex = 0;
 
 static const char stopCmd[] = { "GET /stop " };
 static const char getCmd[] = { "GET " };
@@ -887,8 +894,7 @@ int /* returns count */
 int
 do_writes(
     PRFileDesc *ssl_sock,
-    PRFileDesc *model_sock,
-    int requestCert)
+    PRFileDesc *model_sock)
 {
     int sent = 0;
     int count = 0;
@@ -919,8 +925,7 @@ do_writes(
 static int
 handle_fdx_connection(
     PRFileDesc *tcp_sock,
-    PRFileDesc *model_sock,
-    int requestCert)
+    PRFileDesc *model_sock)
 {
     PRFileDesc *ssl_sock = NULL;
     SECStatus result;
@@ -954,8 +959,7 @@ handle_fdx_connection(
     lockedVars_AddToCount(&lv, 1);
 
     /* Attempt to launch the writer thread. */
-    result = launch_thread(do_writes, ssl_sock, (PRFileDesc *)&lv,
-                           requestCert);
+    result = launch_thread(do_writes, ssl_sock, (PRFileDesc *)&lv);
 
     if (result == SECSuccess)
         do {
@@ -1087,7 +1091,7 @@ makeCorruptedOCSPResponse(PLArenaPool *arena)
 }
 
 SECItemArray *
-makeSignedOCSPResponse(PLArenaPool *arena, ocspStaplingModeType osm,
+makeSignedOCSPResponse(PLArenaPool *arena,
                        CERTCertificate *cert, secuPWData *pwdata)
 {
     SECItemArray *result = NULL;
@@ -1111,7 +1115,7 @@ makeSignedOCSPResponse(PLArenaPool *arena, ocspStaplingModeType osm,
 
     nextUpdate = now + (PRTime)60 * 60 * 24 * PR_USEC_PER_SEC; /* plus 1 day */
 
-    switch (osm) {
+    switch (ocspStaplingMode) {
         case osm_good:
         case osm_badsig:
             sr = CERT_CreateOCSPSingleResponseGood(arena, cid, now,
@@ -1144,7 +1148,7 @@ makeSignedOCSPResponse(PLArenaPool *arena, ocspStaplingModeType osm,
     singleResponses[1] = NULL;
 
     ocspResponse = CERT_CreateEncodedOCSPSuccessResponse(arena,
-                                                         (osm == osm_badsig)
+                                                         (ocspStaplingMode == osm_badsig)
                                                              ? NULL
                                                              : ca,
                                                          ocspResponderID_byName, now, singleResponses,
@@ -1169,8 +1173,8 @@ makeSignedOCSPResponse(PLArenaPool *arena, ocspStaplingModeType osm,
 }
 
 void
-setupCertStatus(PLArenaPool *arena, enum ocspStaplingModeEnum ocspStaplingMode,
-                CERTCertificate *cert, SSLKEAType kea, secuPWData *pwdata)
+setupCertStatus(PLArenaPool *arena,
+                CERTCertificate *cert, int index, secuPWData *pwdata)
 {
     if (ocspStaplingMode == osm_random) {
         /* 6 different responses */
@@ -1207,7 +1211,7 @@ setupCertStatus(PLArenaPool *arena, enum ocspStaplingModeEnum ocspStaplingMode,
             case osm_unknown:
             case osm_badsig:
                 multiOcspResponses =
-                    makeSignedOCSPResponse(arena, ocspStaplingMode, cert,
+                    makeSignedOCSPResponse(arena, cert,
                                            pwdata);
                 break;
             case osm_corrupted:
@@ -1224,16 +1228,13 @@ setupCertStatus(PLArenaPool *arena, enum ocspStaplingModeEnum ocspStaplingMode,
                 break;
         }
         if (multiOcspResponses) {
-            certStatus[kea] = multiOcspResponses;
+            certStatus[index] = multiOcspResponses;
         }
     }
 }
 
 int
-handle_connection(
-    PRFileDesc *tcp_sock,
-    PRFileDesc *model_sock,
-    int requestCert)
+handle_connection(PRFileDesc *tcp_sock, PRFileDesc *model_sock)
 {
     PRFileDesc *ssl_sock = NULL;
     PRFileDesc *local_file_fd = NULL;
@@ -1251,11 +1252,10 @@ handle_connection(
     PRSocketOptionData opt;
     PRIOVec iovs[16];
     char msgBuf[160];
-    char buf[10240];
+    char buf[10240] = { 0 };
     char fileName[513];
     char proto[128];
     PRDescIdentity aboveLayer = PR_INVALID_IO_LAYER;
-    SSLKEAType kea;
 
     pBuf = buf;
     bufRem = sizeof buf;
@@ -1267,7 +1267,6 @@ handle_connection(
 
     VLOG(("selfserv: handle_connection: starting\n"));
     if (useModelSocket && model_sock) {
-        SECStatus rv;
         ssl_sock = SSL_ImportFD(model_sock, tcp_sock);
         if (!ssl_sock) {
             errWarn("SSL_ImportFD with model");
@@ -1280,12 +1279,6 @@ handle_connection(
         }
     } else {
         ssl_sock = tcp_sock;
-    }
-
-    for (kea = kt_rsa; kea < kt_kea_size; kea++) {
-        if (certStatus[kea] != NULL) {
-            SSL_SetStapledOCSPResponses(ssl_sock, certStatus[kea], kea);
-        }
     }
 
     if (loggingLayer) {
@@ -1589,8 +1582,7 @@ sigusr1_handler(int sig)
 SECStatus
 do_accepts(
     PRFileDesc *listen_sock,
-    PRFileDesc *model_sock,
-    int requestCert)
+    PRFileDesc *model_sock)
 {
     PRNetAddr addr;
     PRErrorCode perr;
@@ -1660,7 +1652,6 @@ do_accepts(
             JOB *myJob = (JOB *)myLink;
             myJob->tcp_sock = tcp_sock;
             myJob->model_sock = model_sock;
-            myJob->requestCert = requestCert;
         }
 
         PR_APPEND_LINK(myLink, &jobQ);
@@ -1819,14 +1810,13 @@ handshakeCallback(PRFileDesc *fd, void *client_data)
 void
 server_main(
     PRFileDesc *listen_sock,
-    int requestCert,
     SECKEYPrivateKey **privKey,
     CERTCertificate **cert,
     const char *expectedHostNameVal)
 {
+    int i;
     PRFileDesc *model_sock = NULL;
     int rv;
-    SSLKEAType kea;
     SECStatus secStatus;
 
     if (useModelSocket) {
@@ -1860,12 +1850,6 @@ server_main(
     if (rv != SECSuccess) {
         errExit("error enabling RollBack detection ");
     }
-    if (bypassPKCS11) {
-        rv = SSL_OptionSet(model_sock, SSL_BYPASS_PKCS11, PR_TRUE);
-        if (rv != SECSuccess) {
-            errExit("error enabling PKCS11 bypass ");
-        }
-    }
     if (disableLocking) {
         rv = SSL_OptionSet(model_sock, SSL_NO_LOCKS, PR_TRUE);
         if (rv != SECSuccess) {
@@ -1876,13 +1860,6 @@ server_main(
         rv = SSL_OptionSet(model_sock, SSL_ENABLE_SESSION_TICKETS, PR_TRUE);
         if (rv != SECSuccess) {
             errExit("error enabling Session Ticket extension ");
-        }
-    }
-
-    if (enableCompression) {
-        rv = SSL_OptionSet(model_sock, SSL_ENABLE_DEFLATE, PR_TRUE);
-        if (rv != SECSuccess) {
-            errExit("error enabling compression ");
         }
     }
 
@@ -1929,12 +1906,17 @@ server_main(
 
     /* This uses the legacy certificate API.  See mySSLSNISocketConfig() for the
      * new, prefered API. */
-    for (kea = kt_rsa; kea < kt_kea_size; kea++) {
-        if (cert[kea] != NULL) {
-            secStatus = SSL_ConfigSecureServer(model_sock,
-                                               cert[kea], privKey[kea], kea);
+    for (i = 0; i < certNicknameIndex; i++) {
+        if (cert[i] != NULL) {
+            const SSLExtraServerCertData ocspData = {
+                ssl_auth_null, NULL, certStatus[i], NULL
+            };
+
+            secStatus = SSL_ConfigServerCert(model_sock, cert[i],
+                                             privKey[i], &ocspData,
+                                             sizeof(ocspData));
             if (secStatus != SECSuccess)
-                errExit("SSL_ConfigSecureServer");
+                errExit("SSL_ConfigServerCert");
         }
     }
 
@@ -1956,6 +1938,10 @@ server_main(
         if (enabledVersions.max < SSL_LIBRARY_VERSION_TLS_1_3) {
             errExit("You tried enabling 0RTT without enabling TLS 1.3!");
         }
+        rv = SSL_SetupAntiReplay(10 * PR_USEC_PER_SEC, 7, 14);
+        if (rv != SECSuccess) {
+            errExit("error configuring anti-replay ");
+        }
         rv = SSL_OptionSet(model_sock, SSL_ENABLE_0RTT_DATA, PR_TRUE);
         if (rv != SECSuccess) {
             errExit("error enabling 0RTT ");
@@ -1973,6 +1959,20 @@ server_main(
         rv = SSL_SetNextProtoNego(model_sock, alpnVal, sizeof(alpnVal));
         if (rv != SECSuccess) {
             errExit("error enabling ALPN");
+        }
+    }
+
+    if (enabledGroups) {
+        rv = SSL_NamedGroupConfig(model_sock, enabledGroups, enabledGroupsCount);
+        if (rv < 0) {
+            errExit("SSL_NamedGroupConfig failed");
+        }
+    }
+
+    if (enabledSigSchemes) {
+        rv = SSL_SignatureSchemePrefSet(model_sock, enabledSigSchemes, enabledSigSchemeCount);
+        if (rv < 0) {
+            errExit("SSL_SignatureSchemePrefSet failed");
         }
     }
 
@@ -2012,7 +2012,7 @@ server_main(
     /* end of ssl configuration. */
 
     /* Now, do the accepting, here in the main thread. */
-    rv = do_accepts(listen_sock, model_sock, requestCert);
+    rv = do_accepts(listen_sock, model_sock);
 
     terminateWorkerThreads();
 
@@ -2179,11 +2179,6 @@ int
 main(int argc, char **argv)
 {
     char *progName = NULL;
-    char *nickName = NULL;
-#ifndef NSS_DISABLE_ECC
-    char *ecNickName = NULL;
-#endif
-    char *dsaNickName = NULL;
     const char *fileName = NULL;
     char *cipherString = NULL;
     const char *dir = ".";
@@ -2193,12 +2188,12 @@ main(int argc, char **argv)
     char *tmp;
     char *envString;
     PRFileDesc *listen_sock;
-    CERTCertificate *cert[kt_kea_size] = { NULL };
-    SECKEYPrivateKey *privKey[kt_kea_size] = { NULL };
+    CERTCertificate *cert[MAX_CERT_NICKNAME_ARRAY_INDEX] = { NULL };
+    SECKEYPrivateKey *privKey[MAX_CERT_NICKNAME_ARRAY_INDEX] = { NULL };
     int optionsFound = 0;
     int maxProcs = 1;
     unsigned short port = 0;
-    SECStatus rv;
+    SECStatus rv = SECSuccess;
     PRStatus prStatus;
     PRBool bindOnly = PR_FALSE;
     PRBool useLocalThreads = PR_FALSE;
@@ -2208,7 +2203,6 @@ main(int argc, char **argv)
     PRBool debugCache = PR_FALSE; /* bug 90518 */
     char emptyString[] = { "" };
     char *certPrefix = emptyString;
-    PRUint32 protos = 0;
     SSL3Statistics *ssl3stats;
     PRUint32 i;
     secuPWData pwdata = { PW_NONE, 0 };
@@ -2225,10 +2219,11 @@ main(int argc, char **argv)
 
     /* please keep this list of options in ASCII collating sequence.
     ** numbers, then capital letters, then lower case, alphabetical.
-    ** XXX: 'E' and 'x' were used in the past, please leave some
-    **      time before resuing those. */
+    ** XXX: 'B', 'E', 'q', and 'x' were used in the past but removed
+    **      in 3.28, please leave some time before resuing those.
+    **      'z' was removed in 3.39. */
     optstate = PL_CreateOptState(argc, argv,
-                                 "2:A:BC:DGH:L:M:NP:QRS:T:U:V:W:YZa:bc:d:e:f:g:hi:jk:lmn:op:qrst:uvw:yz");
+                                 "2:A:C:DGH:I:J:L:M:NP:QRS:T:U:V:W:YZa:bc:d:e:f:g:hi:jk:lmn:op:rst:uvw:y");
     while ((status = PL_GetNextOpt(optstate)) == PL_OPT_OK) {
         ++optionsFound;
         switch (optstate->option) {
@@ -2238,10 +2233,6 @@ main(int argc, char **argv)
 
             case 'A':
                 ocspStaplingCA = PORT_Strdup(optstate->value);
-                break;
-
-            case 'B':
-                bypassPKCS11 = PR_TRUE;
                 break;
 
             case 'C':
@@ -2258,9 +2249,6 @@ main(int argc, char **argv)
 
             case 'G':
                 enableExtendedMasterSecret = PR_TRUE;
-                break;
-
-            case 'I': /* reserved for OCSP multi-stapling */
                 break;
 
             case 'L':
@@ -2291,7 +2279,11 @@ main(int argc, char **argv)
                 break;
 
             case 'S':
-                dsaNickName = PORT_Strdup(optstate->value);
+                if (certNicknameIndex >= MAX_CERT_NICKNAME_ARRAY_INDEX) {
+                    Usage(progName);
+                    break;
+                }
+                certNicknameArray[certNicknameIndex++] = PORT_Strdup(optstate->value);
                 break;
 
             case 'T':
@@ -2310,7 +2302,9 @@ main(int argc, char **argv)
                 if (SECU_ParseSSLVersionRangeString(optstate->value,
                                                     enabledVersions, &enabledVersions) !=
                     SECSuccess) {
+                    fprintf(stderr, "Bad version specified.\n");
                     Usage(progName);
+                    exit(1);
                 }
                 break;
 
@@ -2344,11 +2338,13 @@ main(int argc, char **argv)
                 dir = optstate->value;
                 break;
 
-#ifndef NSS_DISABLE_ECC
             case 'e':
-                ecNickName = PORT_Strdup(optstate->value);
+                if (certNicknameIndex >= MAX_CERT_NICKNAME_ARRAY_INDEX) {
+                    Usage(progName);
+                    break;
+                }
+                certNicknameArray[certNicknameIndex++] = PORT_Strdup(optstate->value);
                 break;
-#endif /* NSS_DISABLE_ECC */
 
             case 'f':
                 pwdata.source = PW_FROMFILE;
@@ -2387,7 +2383,11 @@ main(int argc, char **argv)
                 break;
 
             case 'n':
-                nickName = PORT_Strdup(optstate->value);
+                if (certNicknameIndex >= MAX_CERT_NICKNAME_ARRAY_INDEX) {
+                    Usage(progName);
+                    break;
+                }
+                certNicknameArray[certNicknameIndex++] = PORT_Strdup(optstate->value);
                 virtServerNameArray[0] = PORT_Strdup(optstate->value);
                 break;
 
@@ -2401,10 +2401,6 @@ main(int argc, char **argv)
 
             case 'p':
                 port = PORT_Atoi(optstate->value);
-                break;
-
-            case 'q':
-                testbypass = PR_TRUE;
                 break;
 
             case 'r':
@@ -2440,16 +2436,32 @@ main(int argc, char **argv)
                 debugCache = PR_TRUE;
                 break;
 
-            case 'z':
-                enableCompression = PR_TRUE;
-                break;
-
             case 'Z':
                 zeroRTT = PR_TRUE;
                 break;
 
             case 'Q':
                 enableALPN = PR_TRUE;
+                break;
+
+            case 'I':
+                rv = parseGroupList(optstate->value, &enabledGroups, &enabledGroupsCount);
+                if (rv != SECSuccess) {
+                    PL_DestroyOptState(optstate);
+                    fprintf(stderr, "Bad group specified.\n");
+                    fprintf(stderr, "Run '%s -h' for usage information.\n", progName);
+                    exit(5);
+                }
+                break;
+
+            case 'J':
+                rv = parseSigSchemeList(optstate->value, &enabledSigSchemes, &enabledSigSchemeCount);
+                if (rv != SECSuccess) {
+                    PL_DestroyOptState(optstate);
+                    fprintf(stderr, "Bad signature scheme specified.\n");
+                    fprintf(stderr, "Run '%s -h' for usage information.\n", progName);
+                    exit(5);
+                }
                 break;
 
             default:
@@ -2500,14 +2512,8 @@ main(int argc, char **argv)
         exit(0);
     }
 
-    if ((nickName == NULL) &&
-        (dsaNickName == NULL)
-#ifndef NSS_DISABLE_ECC
-        && (ecNickName == NULL)
-#endif
-            ) {
-
-        fprintf(stderr, "Required arg '-n' (rsa nickname) not supplied.\n");
+    if (certNicknameIndex == 0) {
+        fprintf(stderr, "Must specify at least one certificate nickname using '-n' (RSA), '-S' (DSA), or 'e' (EC).\n");
         fprintf(stderr, "Run '%s -h' for usage information.\n", progName);
         exit(6);
     }
@@ -2546,6 +2552,14 @@ main(int argc, char **argv)
         tmp = PR_GetEnvSecure("TMPDIR");
     if (!tmp)
         tmp = PR_GetEnvSecure("TEMP");
+
+    /* Call the NSS initialization routines */
+    rv = NSS_Initialize(dir, certPrefix, certPrefix, SECMOD_DB, NSS_INIT_READONLY);
+    if (rv != SECSuccess) {
+        fputs("NSS_Init failed.\n", stderr);
+        exit(8);
+    }
+
     if (envString) {
         /* we're one of the children in a multi-process server. */
         listen_sock = PR_GetInheritedFD(inheritableSockName);
@@ -2600,13 +2614,6 @@ main(int argc, char **argv)
     /* set our password function */
     PK11_SetPasswordFunc(SECU_GetModulePassword);
 
-    /* Call the NSS initialization routines */
-    rv = NSS_Initialize(dir, certPrefix, certPrefix, SECMOD_DB, NSS_INIT_READONLY);
-    if (rv != SECSuccess) {
-        fputs("NSS_Init failed.\n", stderr);
-        exit(8);
-    }
-
     /* all SSL3 cipher suites are enabled by default. */
     if (cipherString) {
         char *cstringSaved = cipherString;
@@ -2645,9 +2652,8 @@ main(int argc, char **argv)
                 }
             }
             if (cipher > 0) {
-                SECStatus status;
-                status = SSL_CipherPrefSetDefault(cipher, SSL_ALLOWED);
-                if (status != SECSuccess)
+                rv = SSL_CipherPrefSetDefault(cipher, SSL_ALLOWED);
+                if (rv != SECSuccess)
                     SECU_PrintError(progName, "SSL_CipherPrefSet()");
             } else {
                 fprintf(stderr,
@@ -2658,128 +2664,37 @@ main(int argc, char **argv)
         PORT_Free(cstringSaved);
     }
 
-    if (testbypass) {
-        const PRUint16 *cipherSuites = SSL_ImplementedCiphers;
-        int i = SSL_NumImplementedCiphers;
-        PRBool enabled;
-
-        for (i = 0; i < SSL_NumImplementedCiphers; i++, cipherSuites++) {
-            if (SSL_CipherPrefGetDefault(*cipherSuites, &enabled) == SECSuccess &&
-                enabled)
-                savecipher(*cipherSuites);
-        }
-        protos = 0;
-        if (enabledVersions.min <= SSL_LIBRARY_VERSION_3_0 &&
-            enabledVersions.max >= SSL_LIBRARY_VERSION_3_0) {
-            protos |= SSL_CBP_SSL3;
-        }
-        if (enabledVersions.min <= SSL_LIBRARY_VERSION_TLS_1_0 &&
-            enabledVersions.max >= SSL_LIBRARY_VERSION_TLS_1_0) {
-            protos |= SSL_CBP_TLS1_0;
-        }
-        /* TLS 1.1 has the same SSL Bypass mode requirements as TLS 1.0 */
-        if (enabledVersions.min <= SSL_LIBRARY_VERSION_TLS_1_1 &&
-            enabledVersions.max >= SSL_LIBRARY_VERSION_TLS_1_1) {
-            protos |= SSL_CBP_TLS1_0;
-        }
-    }
-
     certStatusArena = PORT_NewArena(DER_DEFAULT_CHUNKSIZE);
     if (!certStatusArena)
         errExit("cannot allocate certStatusArena");
 
-    if (nickName) {
-        cert[kt_rsa] = PK11_FindCertFromNickname(nickName, &pwdata);
-        if (cert[kt_rsa] == NULL) {
-            fprintf(stderr, "selfserv: Can't find certificate %s\n", nickName);
+    for (i = 0; i < certNicknameIndex; i++) {
+        cert[i] = PK11_FindCertFromNickname(certNicknameArray[i], &pwdata);
+        if (cert[i] == NULL) {
+            fprintf(stderr, "selfserv: Can't find certificate %s\n", certNicknameArray[i]);
             exit(10);
         }
-        privKey[kt_rsa] = PK11_FindKeyByAnyCert(cert[kt_rsa], &pwdata);
-        if (privKey[kt_rsa] == NULL) {
+        privKey[i] = PK11_FindKeyByAnyCert(cert[i], &pwdata);
+        if (privKey[i] == NULL) {
             fprintf(stderr, "selfserv: Can't find Private Key for cert %s\n",
-                    nickName);
+                    certNicknameArray[i]);
             exit(11);
         }
-        if (testbypass) {
-            PRBool bypassOK;
-            if (SSL_CanBypass(cert[kt_rsa], privKey[kt_rsa], protos, cipherlist,
-                              nciphers, &bypassOK, &pwdata) != SECSuccess) {
-                SECU_PrintError(progName, "Bypass test failed %s\n", nickName);
-                exit(14);
-            }
-            fprintf(stderr, "selfserv: %s can%s bypass\n", nickName,
-                    bypassOK ? "" : "not");
-        }
-        setupCertStatus(certStatusArena, ocspStaplingMode, cert[kt_rsa], kt_rsa,
-                        &pwdata);
+        if (privKey[i]->keyType != ecKey)
+            setupCertStatus(certStatusArena, cert[i], i, &pwdata);
     }
-    if (dsaNickName) {
-        /* Investigate if ssl_kea_dh should be changed to ssl_auth_dsa.
-         * See bug 102794.*/
-        cert[ssl_kea_dh] = PK11_FindCertFromNickname(dsaNickName, &pwdata);
-        if (cert[ssl_kea_dh] == NULL) {
-            fprintf(stderr, "selfserv: Can't find certificate %s\n", dsaNickName);
-            exit(12);
-        }
-        privKey[ssl_kea_dh] = PK11_FindKeyByAnyCert(cert[ssl_kea_dh], &pwdata);
-        if (privKey[ssl_kea_dh] == NULL) {
-            fprintf(stderr, "selfserv: Can't find Private Key for cert %s\n",
-                    dsaNickName);
-            exit(11);
-        }
-        if (testbypass) {
-            PRBool bypassOK;
-            if (SSL_CanBypass(cert[ssl_kea_dh], privKey[ssl_kea_dh], protos, cipherlist,
-                              nciphers, &bypassOK, &pwdata) != SECSuccess) {
-                SECU_PrintError(progName, "Bypass test failed %s\n", nickName);
-                exit(14);
-            }
-            fprintf(stderr, "selfserv: %s can%s bypass\n", nickName,
-                    bypassOK ? "" : "not");
-        }
-        setupCertStatus(certStatusArena, ocspStaplingMode, cert[ssl_kea_dh], ssl_kea_dh,
-                        &pwdata);
-    }
-#ifndef NSS_DISABLE_ECC
-    if (ecNickName) {
-        cert[kt_ecdh] = PK11_FindCertFromNickname(ecNickName, &pwdata);
-        if (cert[kt_ecdh] == NULL) {
-            fprintf(stderr, "selfserv: Can't find certificate %s\n",
-                    ecNickName);
-            exit(13);
-        }
-        privKey[kt_ecdh] = PK11_FindKeyByAnyCert(cert[kt_ecdh], &pwdata);
-        if (privKey[kt_ecdh] == NULL) {
-            fprintf(stderr, "selfserv: Can't find Private Key for cert %s\n",
-                    ecNickName);
-            exit(11);
-        }
-        if (testbypass) {
-            PRBool bypassOK;
-            if (SSL_CanBypass(cert[kt_ecdh], privKey[kt_ecdh], protos, cipherlist,
-                              nciphers, &bypassOK, &pwdata) != SECSuccess) {
-                SECU_PrintError(progName, "Bypass test failed %s\n", ecNickName);
-                exit(15);
-            }
-            fprintf(stderr, "selfserv: %s can%s bypass\n", ecNickName,
-                    bypassOK ? "" : "not");
-        }
-        setupCertStatus(certStatusArena, ocspStaplingMode, cert[kt_ecdh], kt_ecdh,
-                        &pwdata);
-    }
-#endif /* NSS_DISABLE_ECC */
-
-    if (testbypass)
-        goto cleanup;
 
     if (configureWeakDHE > 0) {
         fprintf(stderr, "selfserv: Creating dynamic weak DH parameters\n");
         rv = SSL_EnableWeakDHEPrimeGroup(NULL, PR_TRUE);
+        if (rv != SECSuccess) {
+            goto cleanup;
+        }
         fprintf(stderr, "selfserv: Done creating dynamic weak DH parameters\n");
     }
 
     /* allocate the array of thread slots, and launch the worker threads. */
-    rv = launch_threads(&jobLoop, 0, 0, requestCert, useLocalThreads);
+    rv = launch_threads(&jobLoop, 0, 0, useLocalThreads);
 
     if (rv == SECSuccess && logStats) {
         loggerThread = PR_CreateThread(PR_SYSTEM_THREAD,
@@ -2794,7 +2709,7 @@ main(int argc, char **argv)
     }
 
     if (rv == SECSuccess) {
-        server_main(listen_sock, requestCert, privKey, cert,
+        server_main(listen_sock, privKey, cert,
                     expectedHostNameVal);
     }
 
@@ -2813,14 +2728,14 @@ cleanup:
     }
 
     {
-        int i;
-        for (i = 0; i < kt_kea_size; i++) {
+        for (i = 0; i < certNicknameIndex; i++) {
             if (cert[i]) {
                 CERT_DestroyCertificate(cert[i]);
             }
             if (privKey[i]) {
                 SECKEY_DestroyPrivateKey(privKey[i]);
             }
+            PORT_Free(certNicknameArray[i]);
         }
         for (i = 0; virtServerNameArray[i]; i++) {
             PORT_Free(virtServerNameArray[i]);
@@ -2829,9 +2744,6 @@ cleanup:
 
     if (debugCache) {
         nss_DumpCertificateCacheInfo();
-    }
-    if (nickName) {
-        PORT_Free(nickName);
     }
     if (expectedHostNameVal) {
         PORT_Free(expectedHostNameVal);
@@ -2845,20 +2757,15 @@ cleanup:
     if (certPrefix && certPrefix != emptyString) {
         PORT_Free(certPrefix);
     }
-#ifndef NSS_DISABLE_ECC
-    if (ecNickName) {
-        PORT_Free(ecNickName);
-    }
-#endif
-    if (dsaNickName) {
-        PORT_Free(dsaNickName);
-    }
 
     if (hasSidCache) {
         SSL_ShutdownServerSessionIDCache();
     }
     if (certStatusArena) {
         PORT_FreeArena(certStatusArena, PR_FALSE);
+    }
+    if (enabledGroups) {
+        PORT_Free(enabledGroups);
     }
     if (NSS_Shutdown() != SECSuccess) {
         SECU_PrintError(progName, "NSS_Shutdown");
